@@ -12,10 +12,8 @@ from .db import Database, loads, transaction
 from .evaluation import (
     Switch,
     changed_intervals,
-    check_window,
     evaluate,
     serialize_interval,
-    window_intersects,
 )
 from .params import params_from_row, params_to_json
 from .timeutil import STABILIZATION, parse_utc, to_iso, utcnow
@@ -397,18 +395,15 @@ def _recheck_batches(
 ) -> list[dict]:
     if not intervals:
         return []
+    # 直接走窗口索引做半开区间相交搜索（端点相接不算相交），
+    # 不把全线批次读进内存、不逐条 Python 过滤；多时段命中的批次
+    # 在 ID 集合中天然去重，只追加一条修订。
+    batch_ids = repo.find_intersecting_batch_ids(conn, intervals)
+    # 只读命中批次的正文。
+    batches = repo.fetch_batches_by_ids(conn, batch_ids)
     switches = repo.load_switches(conn)
     rechecked: list[dict] = []
-    for batch in repo.list_all_batches(conn):
-        window_start, window_end = check_window(
-            parse_utc(batch["sampling_start"]),
-            parse_utc(batch["sampling_end"]),
-        )
-        if not any(
-            window_intersects(window_start, window_end, interval)
-            for interval in intervals
-        ):
-            continue
+    for batch in batches:
         result = _persist_evaluation(
             conn,
             batch,

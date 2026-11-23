@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .timeutil import STABILIZATION_SQL_MODIFIER
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
@@ -62,6 +64,28 @@ CREATE TABLE IF NOT EXISTS revisions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_revisions_batch ON revisions (batch_id, sequence);
+
+-- 批次检查窗口定位表：每个批次固定一行，窗口再长也只占固定数量的索引项。
+-- 键为 UTC 定宽字符串（与 SQLite datetime() 输出同格式），字典序即时间序。
+CREATE TABLE IF NOT EXISTS batch_windows (
+    batch_id     INTEGER PRIMARY KEY REFERENCES batches(id) ON DELETE CASCADE,
+    window_start TEXT NOT NULL,
+    window_end   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_batch_windows_start ON batch_windows (window_start);
+CREATE INDEX IF NOT EXISTS idx_batch_windows_end ON batch_windows (window_end);
+"""
+
+#: 老卷迁移：为已登记但没有定位行的批次回填检查窗口
+#: （窗口 = [采样开始 − 5 分钟, 采样结束)，与应用层 check_window 同源）。
+WINDOW_BACKFILL_SQL = f"""
+INSERT INTO batch_windows (batch_id, window_start, window_end)
+SELECT b.id,
+       datetime(b.sampling_start, '{STABILIZATION_SQL_MODIFIER}'),
+       datetime(b.sampling_end)
+  FROM batches b
+ WHERE NOT EXISTS (SELECT 1 FROM batch_windows w WHERE w.batch_id = b.id)
 """
 
 
@@ -84,7 +108,19 @@ class Database:
         conn = self.connect()
         try:
             conn.execute("PRAGMA journal_mode = WAL")
+            # 建表/建索引全部带 IF NOT EXISTS：失败也不会破坏此前已提交的
+            # 批次、索引、日志与修订。
             conn.executescript(SCHEMA)
+            # 老 SQLite 卷上的批次直接纳入定位索引；回填在单事务内完成，
+            # 失败则整体回滚，已提交数据原样保留。
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(WINDOW_BACKFILL_SQL)
+            except BaseException:
+                conn.rollback()
+                raise
+            else:
+                conn.commit()
         finally:
             conn.close()
 

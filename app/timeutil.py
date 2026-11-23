@@ -29,5 +29,18 @@ def to_iso(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+#: 窗口定位索引使用的字典序键格式（UTC、秒精度、定宽，可直接按字符串比较）。
+INDEX_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def to_index_key(value: datetime) -> str:
+    """转换为窗口索引键，与 SQLite ``datetime(...)`` 的输出格式一致。"""
+    return value.astimezone(UTC).strftime(INDEX_TIME_FORMAT)
+
+
+#: 供 SQLite ``datetime(...)`` 使用的稳定期修饰符，与 :data:`STABILIZATION` 同源。
+STABILIZATION_SQL_MODIFIER = f"-{int(STABILIZATION.total_seconds())} seconds"
+
+
 def utcnow() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
